@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Conway's Life Garden — Stable Defaults</title>
+  <title>Conway's Garden — Interactive</title>
   <style>
     :root{
       --ui-bg:#0b0b0f; /* page bg */
@@ -84,8 +84,8 @@
 <body>
   <div id="wrap">
     <aside id="sidebar">
-      <div id="title"><div class="dot"></div> Conway's Life Garden</div>
-      <div id="subtitle">Stable‑civilization defaults: gentler food needs, higher diffusion, lower decay. Click/drag or touch to seed life or paint food.</div>
+      <div id="title"><div class="dot"></div> Conway's Garden</div>
+      <div id="subtitle">Healthy, always‑moving defaults: generous food, diffusion, and optional auto‑growth pulses. Click/drag or touch to seed life or paint food.</div>
 
       <fieldset>
         <legend>Simulation</legend>
@@ -128,19 +128,35 @@
       <fieldset>
         <legend>Food Field</legend>
         <label>Food needed to survive
-          <input id="foodNeed" type="range" min="0" max="100" value="6" />
+          <input id="foodNeed" type="range" min="0" max="100" value="4" />
         </label>
         <label>Food needed to birth
-          <input id="foodBirth" type="range" min="0" max="100" value="14" />
+          <input id="foodBirth" type="range" min="0" max="100" value="10" />
         </label>
         <label>Food consumed per alive
-          <input id="foodEat" type="range" min="0" max="100" value="12" />
+          <input id="foodEat" type="range" min="0" max="100" value="10" />
         </label>
         <label>Diffusion (spread)
-          <input id="diffuse" type="range" min="0" max="100" value="15" />
+          <input id="diffuse" type="range" min="0" max="100" value="18" />
         </label>
         <label>Decay (fade)
-          <input id="decay" type="range" min="0" max="50" value="1" />
+          <input id="decay" type="range" min="0" max="50" value="0" />
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Auto Food Growth</legend>
+        <label>Enable growth
+          <input id="growthOn" type="checkbox" checked />
+        </label>
+        <label>Growth per second
+          <input id="growthRate" type="range" min="0" max="100" value="18" />
+        </label>
+        <label>Pulse frequency (Hz)
+          <input id="pulseHz" type="range" min="0" max="2" step="0.01" value="0.40" />
+        </label>
+        <label>Pulse strength
+          <input id="pulseAmt" type="range" min="0" max="100" value="25" />
         </label>
       </fieldset>
 
@@ -219,6 +235,10 @@
       foodEat: document.getElementById('foodEat'),
       diffuse: document.getElementById('diffuse'),
       decay: document.getElementById('decay'),
+      growthOn: document.getElementById('growthOn'),
+      growthRate: document.getElementById('growthRate'),
+      pulseHz: document.getElementById('pulseHz'),
+      pulseAmt: document.getElementById('pulseAmt'),
       brush: document.getElementById('brush'),
       palette: document.getElementById('palette'),
       modeLife: document.getElementById('modeLife'),
@@ -240,14 +260,16 @@
     let foodA, foodB; // Float32
     let running=false, simTime=0, lastT=performance.now();
     let frames=0, fps=0, lastFpsT=performance.now();
+    let pulseTimer=0; // for auto pulses
 
     // Parameters (normalized where helpful)
     const P = {
       surviveMin:2, surviveMax:3, birthEq:3,
-      foodNeed:0.06, foodBirth:0.14, foodEat:0.12,
-      diffuse:0.15, decay:0.001,
+      foodNeed:0.04, foodBirth:0.10, foodEat:0.10,
+      diffuse:0.18, decay:0.0005,
       cellSize:4, speed:24,
-      palette:'rainbow'
+      palette:'rainbow',
+      growthOn:true, growthPerSec:0.045, pulseHz:0.40, pulseAmt:0.25
     };
 
     function applyControlsToParams(){
@@ -263,6 +285,10 @@
       P.diffuse = +ctl.diffuse.value/100;
       P.decay = +ctl.decay.value/1000; // fine grain
       P.palette = ctl.palette.value;
+      P.growthOn = !!ctl.growthOn.checked;
+      P.growthPerSec = (+ctl.growthRate.value/100) * 0.25; // up to +0.25 per second
+      P.pulseHz = +ctl.pulseHz.value;
+      P.pulseAmt = (+ctl.pulseAmt.value/100) * 0.5; // up to +0.5 per hit
     }
 
     // --- Resize / Grid setup ---
@@ -274,7 +300,6 @@
       gridH = Math.floor(H / P.cellSize);
 
       canvas.width = gridW; canvas.height = gridH;
-      // Canvas CSS stretched to viewport (stage-wrap manages it)
       ctx.imageSmoothingEnabled = false;
       pixels = ctx.createImageData(gridW, gridH);
 
@@ -286,7 +311,6 @@
       foodA = new Float32Array(N); foodB = new Float32Array(N);
 
       if(oldLife && oldAge && oldFood){
-        // Copy overlapping region
         const oldW = canvas._oldW||0, oldH = canvas._oldH||0;
         const copyW = Math.min(oldW, gridW), copyH = Math.min(oldH, gridH);
         for(let y=0;y<copyH;y++){
@@ -299,7 +323,7 @@
           }
         }
       } else {
-        randomizeLife(0.22);
+        randomizeLife(0.24);
         seedFoodField();
       }
       canvas._oldW = gridW; canvas._oldH = gridH;
@@ -309,7 +333,7 @@
     function index(x,y){ return y*gridW + x }
 
     // --- Seeding ---
-    function randomizeLife(p=0.22){
+    function randomizeLife(p=0.24){
       for(let i=0;i<lifeA.length;i++){
         const alive = (Math.random() < p)?1:0;
         lifeA[i]=alive; ageA[i]= alive? (1+Math.floor(rand()*20)) : 0;
@@ -320,12 +344,29 @@
         for(let x=0;x<gridW;x++){
           // Multi-octave simple hash noise for colorful base
           const n = 0.55*noise2D(x*0.11, y*0.07) + 0.27*noise2D(x*0.041, y*0.052) + 0.18*noise2D(x*0.013, y*0.017);
-          foodA[index(x,y)] = 0.25 + 0.75*n; // 0.25..1.0 baseline
+          foodA[index(x,y)] = 0.45 + 0.55*n; // richer baseline 0.45..1.0
         }
       }
     }
     function clearLife(){ lifeA.fill(0); ageA.fill(0); }
     function clearFood(){ foodA.fill(0); }
+
+    // --- Auto growth helpers ---
+    function growFood(dt){
+      if(!P.growthOn) return;
+      const add = P.growthPerSec * dt;
+      if(add<=0) return;
+      for(let i=0;i<foodA.length;i++) foodA[i] = clamp(foodA[i] + add, 0, 1);
+    }
+    function pulseFood(){
+      if(P.pulseHz<=0 || P.pulseAmt<=0) return;
+      // sprinkle small random hits across the map (about 0.25% of cells)
+      const N = gridW*gridH; const hits = Math.max(8, Math.floor(N*0.0025));
+      for(let k=0;k<hits;k++){
+        const i = (Math.random()*N)|0;
+        foodA[i] = clamp(foodA[i] + (P.pulseAmt * (0.6 + 0.8*Math.random())), 0, 1);
+      }
+    }
 
     // --- Step Simulation ---
     function stepLife(){
@@ -338,13 +379,11 @@
           const xm = (x-1+W)%W, xp=(x+1)%W;
           const i = y*W+x;
           const n00 = fa[i];
-          // 4-neighbor laplacian (cheap and pretty)
           const n1 = fa[ym*W + x], n2 = fa[yp*W + x], n3 = fa[y*W + xm], n4 = fa[y*W + xp];
           const avg = (n1+n2+n3+n4)*0.25;
           fb[i] = clamp((n00*(1-d) + avg*d) * k, 0, 1);
         }
       }
-      // swap food buffers
       [foodA, foodB] = [foodB, foodA];
 
       // Life using classic Moore neighbors + food gating
@@ -363,19 +402,16 @@
           let foodHere = f[i];
           if(alive){
             if(n>=smin && n<=smax && foodHere>needS){
-              lb[i]=1; ab[i]=aa[i]+1; // grow older
-              f[i]=clamp(foodHere - eat*0.5, 0, 1); // gentle consumption
-            } else {
-              lb[i]=0; ab[i]=0;
-            }
+              lb[i]=1; ab[i]=aa[i]+1;
+              f[i]=clamp(foodHere - eat*0.4, 0, 1); // gentle consumption
+            } else { lb[i]=0; ab[i]=0; }
           } else {
             if(n===beq && foodHere>needB){
-              lb[i]=1; ab[i]=1; f[i]=clamp(foodHere - eat, 0, 1);
+              lb[i]=1; ab[i]=1; f[i]=clamp(foodHere - eat*0.8, 0, 1);
             } else { lb[i]=0; ab[i]=0; }
           }
         }
       }
-      // swap life buffers
       [lifeA, lifeB] = [lifeB, lifeA];
       [ageA, ageB]   = [ageB, ageA];
     }
@@ -386,14 +422,12 @@
       let p=0;
       for(let i=0;i<W*H;i++){
         if(la[i]){
-          // Alive: color by age & palette
           const age = aa[i];
           let r=0,g=0,b=0;
           if(P.palette==='biolume'){
             const h=(age*11 + (i%W))*0.9 % 360; const [R,G,B]=hsvToRgb(h,1,1);
             r=R; g=G; b=B;
           } else if(P.palette==='ember'){
-            // ember-ish oranges with brightness by food
             const v = 0.6 + 0.4*Math.tanh(age*0.05);
             const [R,G,B] = hsvToRgb(24 + (age%40), 0.95, v);
             r=R; g=G; b=B;
@@ -403,7 +437,6 @@
           }
           data[p++]=r; data[p++]=g; data[p++]=b; data[p++]=255;
         } else {
-          // Empty: show food field as subtle terrain
           const fv = f[i];
           let r=0,g=0,b=0;
           if(P.palette==='ember'){
@@ -431,6 +464,14 @@
         stepLife();
         simTime -= stepTime;
       }
+      // continuous food growth + pulses independent of discrete steps
+      growFood(dt);
+      pulseTimer += dt;
+      if(P.pulseHz>0){
+        const interval = 1/P.pulseHz;
+        while(pulseTimer >= interval){ pulseFood(); pulseTimer -= interval; }
+      }
+
       render();
       frames++;
       if(now - lastFpsT > 500){ fps = Math.round( frames * 1000 / (now - lastFpsT) ); frames=0; lastFpsT = now; }
@@ -494,7 +535,7 @@
     Object.values(ctl).forEach(el=>{
       if(!el || !(el instanceof HTMLElement)) return;
       const type = (el.getAttribute('type')||'').toLowerCase();
-      if(type==='range' || el.tagName==='SELECT'){
+      if(type==='range' || el.tagName==='SELECT' || type==='checkbox'){
         el.addEventListener('input', ()=>applyControlsToParams());
       }
     });
@@ -506,20 +547,17 @@
     ctl.btnClearFood.addEventListener('click', ()=>{ clearFood(); });
     ctl.btnReset.addEventListener('click', ()=>{
       ctl.speed.value=24; ctl.cellSize.value=4; ctl.surviveMin.value=2; ctl.surviveMax.value=3; ctl.birthEq.value=3;
-      ctl.foodNeed.value=6; ctl.foodBirth.value=14; ctl.foodEat.value=12; ctl.diffuse.value=15; ctl.decay.value=1;
+      ctl.foodNeed.value=4; ctl.foodBirth.value=10; ctl.foodEat.value=10; ctl.diffuse.value=18; ctl.decay.value=0;
+      ctl.growthOn.checked=true; ctl.growthRate.value=18; ctl.pulseHz.value=0.40; ctl.pulseAmt.value=25;
       ctl.brush.value=10; ctl.palette.value='rainbow'; ctl.modeLife.checked=true; applyControlsToParams();
     });
 
     // --- Mobile sheet: clone controls from sidebar ---
     function buildMobileSheet(){
       const clone = sidebar.cloneNode(true);
-      // remove sidebar-specific visuals
-      clone.id='';
-      sheetContent.innerHTML='';
-      // move only fieldsets
+      clone.id=''; sheetContent.innerHTML='';
       clone.querySelectorAll('fieldset').forEach(fs=> sheetContent.appendChild(fs));
-      // re-bind references after move
-      ['speed','cellSize','surviveMin','surviveMax','birthEq','foodNeed','foodBirth','foodEat','diffuse','decay','brush','palette','modeLife','modeEraseLife','modeFood','modeEraseFood','btnToggle','btnStep','btnRandom','btnFoodSeed','btnClear','btnClearFood','btnReset'].forEach(id=>{
+      ['speed','cellSize','surviveMin','surviveMax','birthEq','foodNeed','foodBirth','foodEat','diffuse','decay','growthOn','growthRate','pulseHz','pulseAmt','brush','palette','modeLife','modeEraseLife','modeFood','modeEraseFood','btnToggle','btnStep','btnRandom','btnFoodSeed','btnClear','btnClearFood','btnReset'].forEach(id=>{
         ctl[id] = document.getElementById(id) || sheetContent.querySelector('#'+id) || sheetContent.querySelector('[id="'+id+'"]');
       });
     }
@@ -534,8 +572,8 @@
     window.addEventListener('resize', resize);
     resize();
 
-    // Initial seed for stability
-    randomizeLife(0.22);
+    // Initial seed for healthy motion
+    randomizeLife(0.24);
     seedFoodField();
     play();
   </script>
