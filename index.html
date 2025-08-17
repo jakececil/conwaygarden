@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Conway's Game of Life — Passive Rainbow Base</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    canvas {
+      width: 100vw; height: 100vh;
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: #000;
+    }
+    #badge {
+      position: fixed; left: 10px; bottom: 10px; color: #9aa; font-size: 12px; opacity: 0; transition: .3s opacity;
+      background: rgba(0,0,0,.6); padding: 6px 8px; border-radius: 6px; backdrop-filter: blur(2px);
+      user-select: none; pointer-events: none;
+    }
+    #badge.show { opacity: .9; }
+  </style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="badge"></div>
+  <script>
+  (() => {
+    const CELL_PIXEL_SIZE = 4;
+    const INIT_FILL = 0.23;
+    const STEP_MS = 32;
+    const DRIZZLE_RATE = 0.0015;
+    const WRAP_EDGES = true;
+    const PALETTE = [
+      [250, 68, 84],
+      [255, 140, 46],
+      [255, 211, 67],
+      [100, 220, 120],
+      [56, 195, 255],
+      [95, 145, 255],
+      [180, 125, 255],
+      [255, 110, 200],
+      [255, 170, 120],
+      [160, 255, 160],
+      [120, 220, 255],
+      [255, 255, 255]
+    ];
+
+    const view = document.getElementById('view');
+    const vctx = view.getContext('2d');
+    let off, octx, img, pixels;
+    let cols = 0, rows = 0, size = 0;
+    let cur, nxt, age, energy;
+    let last = performance.now();
+    let acc = 0;
+
+    const rand = (n) => (Math.random() * n) | 0;
+    const hash2 = (x, y) => {
+      let h = (x * 0x9E3779B1) ^ (y * 0x85EBCA77);
+      h ^= h >>> 16; h = Math.imul(h, 0x7feb352d);
+      h ^= h >>> 15; h = Math.imul(h, 0x846ca68b);
+      h ^= h >>> 16;
+      return h >>> 0;
+    };
+    function pickColorIndex(x, y) { return hash2(x, y) % PALETTE.length; }
+    function setPixel(x, y, r, g, b, a=255) {
+      const i = (y * cols + x) << 2;
+      pixels[i] = r; pixels[i+1] = g; pixels[i+2] = b; pixels[i+3] = a;
+    }
+    function drawBoard() {
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          const i = y * cols + x;
+          const e = energy[i];
+          if (e === 0) { setPixel(x, y, 0, 0, 0, 255); continue; }
+          const [br, bg, bb] = PALETTE[pickColorIndex(x, y)];
+          const b = e / 255;
+          const k = b*b * (1.0 - 0.3*(1-b));
+          const r = (br * k) | 0;
+          const g = (bg * k) | 0;
+          const b3 = (bb * k) | 0;
+          setPixel(x, y, r, g, b3, 255);
+        }
+      }
+      octx.putImageData(img, 0, 0);
+      vctx.clearRect(0, 0, view.width, view.height);
+      vctx.drawImage(off, 0, 0, view.width, view.height);
+    }
+    function neighborCount(x, y) {
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          let nx = x + dx, ny = y + dy;
+          if (WRAP_EDGES) {
+            if (nx < 0) nx = cols - 1; else if (nx >= cols) nx = 0;
+            if (ny < 0) ny = rows - 1; else if (ny >= rows) ny = 0;
+            n += cur[ny * cols + nx];
+          } else {
+            if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+            n += cur[ny * cols + nx];
+          }
+        }
+      }
+      return n;
+    }
+    function step() {
+      for (let y = 0; y < rows; y++) {
+        const row = y * cols;
+        for (let x = 0; x < cols; x++) {
+          const i = row + x;
+          const alive = cur[i];
+          const n = neighborCount(x, y);
+          let aliveNext = 0;
+          if (alive) { aliveNext = (n === 2 || n === 3) ? 1 : 0; }
+          else { aliveNext = (n === 3) ? 1 : 0; }
+          nxt[i] = aliveNext;
+          age[i] = aliveNext ? (age[i] + 1) & 0xFF : 0;
+          energy[i] = aliveNext ? Math.min(255, energy[i] + 85) : (energy[i] * 235) >> 8;
+        }
+      }
+      const spawns = Math.max(1, (size * DRIZZLE_RATE) | 0);
+      for (let k = 0; k < spawns; k++) {
+        const i = rand(size);
+        nxt[i] = 1;
+        energy[i] = 255;
+        age[i] = (age[i] + 1) & 0xFF;
+      }
+      const tmp = cur; cur = nxt; nxt = tmp;
+    }
+    function resize() {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const targetCols = Math.max(64, Math.floor(vw / CELL_PIXEL_SIZE));
+      const targetRows = Math.max(48, Math.floor(vh / CELL_PIXEL_SIZE));
+      cols = targetCols;
+      rows = targetRows;
+      size = cols * rows;
+      view.width = Math.floor(vw * dpr);
+      view.height = Math.floor(vh * dpr);
+      view.style.width = vw + 'px';
+      view.style.height = vh + 'px';
+      vctx.imageSmoothingEnabled = false;
+      off = document.createElement('canvas');
+      off.width = cols; off.height = rows;
+      octx = off.getContext('2d');
+      img = octx.createImageData(cols, rows);
+      pixels = img.data;
+      cur = new Uint8Array(size);
+      nxt = new Uint8Array(size);
+      age = new Uint8Array(size);
+      energy = new Uint8Array(size);
+      for (let i = 0; i < size; i++) {
+        const alive = Math.random() < INIT_FILL ? 1 : 0;
+        cur[i] = alive;
+        energy[i] = alive ? (128 + rand(128)) : 0;
+        age[i] = alive ? rand(5) : 0;
+      }
+      document.getElementById('badge').textContent = `${cols} × ${rows} grid (${(size/1000).toFixed(1)}k cells)`;
+      const b = document.getElementById('badge');
+      b.classList.add('show');
+      clearTimeout(resize._t);
+      resize._t = setTimeout(() => b.classList.remove('show'), 1500);
+    }
+    function loop(t) {
+      const dt = t - last; last = t; acc += dt;
+      while (acc >= STEP_MS) { step(); acc -= STEP_MS; }
+      drawBoard();
+      requestAnimationFrame(loop);
+    }
+    resize();
+    last = performance.now();
+    vctx.imageSmoothingEnabled = false;
+    requestAnimationFrame(loop);
+    window.addEventListener('resize', () => { resize(); });
+  })();
+  </script>
+</body>
+</html>
